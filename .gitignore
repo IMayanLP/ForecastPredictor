@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# IDE
+.idea/
+
+# Dados (pesados / sensíveis)
+data/
+
+# Setup Claude (pessoal)
+CLAUDE.md
+.claude/
+guia-replicar-setup-claude.md
