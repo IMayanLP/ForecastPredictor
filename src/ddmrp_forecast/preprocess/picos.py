@@ -6,7 +6,8 @@ from ddmrp_forecast.features.janelas import agrupar_series, media_movel_defasada
 
 
 def marcar_picos(df: pd.DataFrame, chave: tuple[str, ...], fator_iqr: float = 3.0,
-                 quartis_so_com_consumo: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
+                 quartis_so_com_consumo: bool = True,
+                 ate: pd.Timestamp | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Adiciona LimiteSuperior e EhPico. Retorna (df, quartis por série).
 
     Q1/Q3/IQR ficam só na tabela de quartis (no Colab iam para cada linha via merge).
@@ -16,6 +17,9 @@ def marcar_picos(df: pd.DataFrame, chave: tuple[str, ...], fator_iqr: float = 3.
 
     # séries intermitentes: com os zeros, Q1 = Q3 = 0 e qualquer venda vira pico
     consumo = df["Consumo"].where(df["Consumo"] > 0) if quartis_so_com_consumo else df["Consumo"]
+    # quartis só do período de treino (Data < ate): o limite não enxerga validação/teste
+    if ate is not None:
+        consumo = consumo.where(df["Data"] < ate)
     por_serie = consumo.groupby(codigos)
     quartis = pd.DataFrame({
         "Q1": por_serie.quantile(0.25).to_numpy(),
@@ -44,11 +48,14 @@ def resumir_picos(df: pd.DataFrame, chave: tuple[str, ...]) -> pd.DataFrame:
     return resumo.sort_values("QuantidadePicos", ascending=False)
 
 
-def limpar_picos(df: pd.DataFrame, chave: tuple[str, ...], janela: int = 7) -> pd.DataFrame:
-    """Consumo_Limpo = Consumo com cada pico trocado pela média dos `janela` registros anteriores sem pico.
-
-    A janela conta registros, não dias: roda antes de completar o calendário (igual ao Colab).
-    """
+def limpar_picos(df: pd.DataFrame, chave: tuple[str, ...], janela: int = 7, substituicao: str = "media") -> pd.DataFrame:
+    # "media": pico vira a média dos `janela` registros anteriores sem pico (Colab; conta registros, não dias)
+    # "limite": pico vira o LimiteSuperior da série (Q3 + FATOR_IQR·IQR), mantendo a venda com o maior valor normal
+    if substituicao == "limite":
+        df["Consumo_Limpo"] = df["Consumo"].mask(df["EhPico"], df["LimiteSuperior"])
+        return df
+    if substituicao != "media":
+        raise ValueError(f"substituicao deve ser 'media' ou 'limite', não {substituicao!r}")
     df["Consumo_Limpo"] = df["Consumo"].where(~df["EhPico"])
     coluna_media = f"Media_{janela}_Limpa"
     df[coluna_media] = media_movel_defasada(df, chave, "Consumo_Limpo", janela, min_periodos=1)

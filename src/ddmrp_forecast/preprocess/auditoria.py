@@ -14,15 +14,20 @@ def _diferentes(obtido: np.ndarray, esperado: np.ndarray) -> int:
     return int((nulo_o != nulo_e).sum() + valores.sum())
 
 
-def auditar_picos(df: pd.DataFrame, janela_limpeza: int = 7) -> tuple[dict[str, int], dict[str, int]]:
-    media = df[f"Media_{janela_limpeza}_Limpa"].to_numpy(float)
-    esperado = np.where(df["EhPico"], np.nan_to_num(media, nan=0.0), df["Consumo"].to_numpy(float))
+def auditar_picos(df: pd.DataFrame, janela_limpeza: int = 7,
+                  substituicao: str = "media") -> tuple[dict[str, int], dict[str, int]]:
     limpo = df["Consumo_Limpo"].to_numpy(float)
     limite = df["LimiteSuperior"].to_numpy(float)
-    informacoes = {
-        "picos": int(df["EhPico"].sum()),
-        "picos sem histórico (viram 0)": int((df["EhPico"] & np.isnan(media)).sum()),
-    }
+    informacoes = {"picos": int(df["EhPico"].sum())}
+    if substituicao == "limite":
+        esperado = np.where(df["EhPico"], limite, df["Consumo"].to_numpy(float))
+        volume_bruto = float(df["Consumo"].sum())
+        informacoes["volume cortado nos picos (% do Consumo)"] = round(
+            (volume_bruto - float(np.nansum(limpo))) / volume_bruto * 100 if volume_bruto else 0.0, 1)
+    else:
+        media = df[f"Media_{janela_limpeza}_Limpa"].to_numpy(float)
+        esperado = np.where(df["EhPico"], np.nan_to_num(media, nan=0.0), df["Consumo"].to_numpy(float))
+        informacoes["picos sem histórico (viram 0)"] = int((df["EhPico"] & np.isnan(media)).sum())
     erros = {
         "Consumo_Limpo diferente do esperado": _diferentes(limpo, esperado),
         "Consumo_Limpo acima do LimiteSuperior": int(np.nansum(limpo > limite)),
@@ -55,3 +60,38 @@ def auditar_adu(df: pd.DataFrame, chave: tuple[str, ...]) -> tuple[dict[str, int
         "ADU_recalculado diferente do esperado": _diferentes(df["ADU_recalculado"].to_numpy(float), esperado),
     }
     return informacoes, erros
+
+
+def auditar_features(df: pd.DataFrame, chave: tuple[str, ...], lags: tuple[int, ...], janelas: tuple[int, ...],
+                     coluna: str = "Consumo_Limpo") -> tuple[dict[str, int], dict[str, int]]:
+    # refaz Lag_N e Media_N por posição/soma acumulada sobre `coluna` e conta onde o Consumo bruto daria outro valor
+    grupos = agrupar_series(df, chave)
+    posicao = grupos.cumcount().to_numpy()
+    i = np.arange(len(df))
+    erros, informacoes = {}, {}
+    for nome_coluna, valores in [(coluna, df[coluna].to_numpy(float)), ("Consumo", df["Consumo"].to_numpy(float))]:
+        acumulado = grupos[nome_coluna].cumsum().to_numpy(float)
+        for lag in lags:
+            esperado = np.where(posicao >= lag, valores[np.maximum(i - lag, 0)], np.nan)
+            obtido = df[f"Lag_{lag}"].to_numpy(float)
+            if nome_coluna == coluna:
+                erros[f"Lag_{lag} diferente de {coluna}"] = _diferentes_float32(obtido, esperado)
+            else:
+                informacoes[f"Lag_{lag} ≠ Consumo bruto (picos excluídos)"] = _diferentes_float32(obtido, esperado)
+        for janela in janelas:
+            ate_ontem = np.where(posicao >= 1, acumulado[np.maximum(i - 1, 0)], 0.0)
+            antes = np.where(posicao - janela - 1 >= 0, acumulado[np.maximum(i - janela - 1, 0)], 0.0)
+            esperado = np.where(posicao >= janela, (ate_ontem - antes) / janela, np.nan)
+            obtido = df[f"Media_{janela}"].to_numpy(float)
+            if nome_coluna == coluna:
+                erros[f"Media_{janela} diferente de {coluna}"] = _diferentes_float32(obtido, esperado)
+            else:
+                informacoes[f"Media_{janela} ≠ Consumo bruto (picos excluídos)"] = _diferentes_float32(obtido, esperado)
+    return informacoes, erros
+
+
+def _diferentes_float32(obtido: np.ndarray, esperado: np.ndarray) -> int:
+    # features ficam em float32: tolerância relativa do float32
+    nulo_o, nulo_e = np.isnan(obtido), np.isnan(esperado)
+    valores = ~nulo_o & ~nulo_e & ~np.isclose(obtido, esperado, rtol=1e-5, atol=1e-5)
+    return int((nulo_o != nulo_e).sum() + valores.sum())

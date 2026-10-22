@@ -19,4 +19,5 @@ def remover_componentes(df: pd.DataFrame, escopo: tuple[str, ...] = ("Cliente",)
         pd.MultiIndex.from_frame(df[chaves]).isin(pd.MultiIndex.from_frame(componentes))
         & ~eh_mestre.to_numpy()
     )
-    return df.loc[~eh_componente].copy(), int(eh_componente.sum())
+    # loc com máscara já devolve uma cópia; .copy() duplicava a base inteira de novo
+    return df.loc[~eh_componente], int(eh_componente.sum())

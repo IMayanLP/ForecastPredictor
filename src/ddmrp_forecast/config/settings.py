@@ -8,7 +8,12 @@ PASTA_RAW = RAIZ_PROJETO / "data" / "raw"         # Parquet (próximo passo)
 
 # Lista branca: só entram na base os arquivos cujo nome contém um destes clientes
 # (sem diferenciar maiúsculas), ex.: hennings_consumos_01_a_03_2026.rpt
-CLIENTES = ("kasvi")
+CLIENTES = ("ceramfix")
+
+# Leitura: só linhas com Data >= DATA_INICIO e só séries com ao menos VENDAS_MINIMAS dias com Consumo > 0
+# nesse período (Ceramfix: 95% das séries nunca vendem). None = todo o histórico
+DATA_INICIO = "2020-01-01"
+VENDAS_MINIMAS = 1
 
 # Linhas do .rpt processadas por vez (~0,5 GB de RAM por lote)
 TAMANHO_LOTE = 100_000
@@ -18,6 +23,9 @@ TAMANHO_LOTE = 100_000
 # ("Cliente", "IdBodega") → só no mesmo centro de distribuição
 # ()                      → global, igual ao Colab
 ESCOPO_BUFFER_MESTRE = ("Cliente", "IdBodega")
+
+# Perfis DDMRP sob encomenda (Descripcion terminada nestes sufixos) ficam fora do modelo: () = mantém todos
+SUFIXOS_SOB_ENCOMENDA = ("TO",)
 
 # Série temporal = uma referência num centro de distribuição de um cliente
 CHAVE_SERIE = ("Cliente", "Referencia", "IdBodega")  # também é a ordem do df final
@@ -31,18 +39,70 @@ FATOR_IQR = 3.0
 # Q1/Q3 só dos dias com Consumo > 0 (False = igual ao Colab, com os zeros)
 QUARTIS_SO_COM_CONSUMO = True
 
-# Pico substituído pela média dos N registros anteriores (sem picos)
+# Valor que entra no lugar do pico no Consumo_Limpo:
+# "limite" → LimiteSuperior da série | "media" → média dos JANELA_LIMPEZA registros anteriores sem pico (Colab)
+SUBSTITUICAO_PICO = "limite"
 JANELA_LIMPEZA = 7
 
 # Atributos da série copiados para os dias adicionados no calendário
 COLUNAS_FIXAS = ["DiasADU", "ADI", "CV", "TiempoReposicion", "Descripcion", "Unidad"]
 
-# Features sobre Consumo_Limpo (em dias, após completar o calendário)
+# Lags e médias sobre o consumo sem picos (em dias, após completar o calendário): picos não entram nas features
+COLUNA_FEATURES = "Consumo_Limpo"
 LAGS = (1, 2, 3, 7, 14, 28, 365)
-JANELAS_MEDIA = (7, 28, 90, 180, 365)
+JANELAS_MEDIA = (7, 28, 90, 180, 365, 730)
+
+# Intermitência (também sobre COLUNA_FEATURES, até t-1): Freq_N/TamanhoMedio_N, DiasDesdeVenda, TSB e SBA
+JANELAS_FREQUENCIA = (28, 90, 365)
+ALFA_INTERMITENCIA = 0.1
 
 # SET DATEFIRST do SQL Server usado na exportação (7 = domingo é o dia 1, padrão us_english)
 DATEFIRST_SQL = 7
 
 # float32 corta pela metade a memória das features (~80M linhas)
 TIPO_FEATURES = "float32"
+
+# --- Treinamento (LightGBM) ---
+PASTA_MODELO = RAIZ_PROJETO / "data" / "modelo"   # modelo, previsões do teste e métricas por série
+
+# Alvo = média do Consumo_Limpo nos HORIZONTE_DIAS dias a partir de t (1 = consumo do próprio dia)
+COLUNA_ALVO = "Consumo_Limpo"
+HORIZONTE_DIAS = 28
+
+# Split temporal pelos últimos dias da base: [treino][validação][teste]
+# Cada base só tem origens cuja janela do alvo cabe inteira no próprio período
+DIAS_TESTE = 90
+DIAS_VALIDACAO = 60
+
+# Só consumo sem picos; Lag_365/Media_365/Media_730 ficam NaN em séries com pouco histórico (LightGBM aceita)
+# Partes da data fora: aprendiam sazonalidade falsa (Ceramfix, WAPE mediano 0,915 → 0,882 sem elas)
+FEATURES = (
+    "Lag_1", "Lag_2", "Lag_3", "Lag_7", "Lag_14", "Lag_28", "Lag_365",
+    "Media_7", "Media_28", "Media_90", "Media_180", "Media_365", "Media_730",
+    "Freq_28", "Freq_90", "Freq_365", "TamanhoMedio_365", "DiasDesdeVenda", "DiasHistorico", "TSB", "SBA",
+)
+
+# Hurdle: features de quantidade (prefixos abaixo) e alvo divididos pela escala da série (1ª média > 0)
+COLUNAS_ESCALA = ("Media_365", "Media_730")
+PREFIXOS_ESCALAVEIS = ("Lag_", "Media_", "TamanhoMedio_", "TSB", "SBA")
+
+# Concorrentes do modelo no teste (o ADU do banco fica fora: é um retrato único por série, calculado com o futuro)
+BASELINES = ("ADU_recalculado", "Media_28")
+
+PARAMETROS_ARVORES = {
+    "learning_rate": 0.05,
+    "num_leaves": 63,
+    "min_data_in_leaf": 100,
+    "feature_fraction": 0.9,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 1,
+    "seed": 42,
+    "verbose": -1,
+}
+# Hurdle etapa 1: P(alguma venda em [t, t+H-1]) | etapa 2: log(alvo / escala) nas linhas com venda (mediana)
+PARAMETROS_CLASSIFICADOR = PARAMETROS_ARVORES | {"objective": "binary"}
+PARAMETROS_REGRESSOR = PARAMETROS_ARVORES | {"objective": "regression_l1"}
+# Modelo de uma etapa (treinar_lgbm), mantido para comparação
+PARAMETROS_LGBM = PARAMETROS_ARVORES | {"objective": "tweedie", "tweedie_variance_power": 1.3}
+RODADAS_MAXIMAS = 2_000
+PARADA_ANTECIPADA = 100

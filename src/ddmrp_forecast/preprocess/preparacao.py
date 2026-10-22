@@ -8,6 +8,23 @@ from ddmrp_forecast.features.janelas import agrupar_series
 from ddmrp_forecast.preprocess.buffers_mestre import remover_componentes
 
 
+def zerar_consumos_negativos(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    # consumo negativo (devolução/estorno) não é demanda: vira 0 antes de qualquer etapa
+    negativos = df["Consumo"] < 0
+    df["Consumo"] = df["Consumo"].mask(negativos, 0.0)
+    return df, int(negativos.sum())
+
+
+def remover_sob_encomenda(df: pd.DataFrame, chave: tuple[str, ...],
+                          sufixos: tuple[str, ...]) -> tuple[pd.DataFrame, int, int]:
+    # perfis DDMRP "sob encomenda" (Descripcion terminada em TO: MTO, PTO, DTO...) não têm forecast
+    if not sufixos:
+        return df, 0, 0
+    sob_encomenda = df["Descripcion"].astype("string").str.endswith(sufixos, na=False).to_numpy()
+    series = int(df.loc[sob_encomenda, list(chave)].drop_duplicates().shape[0])
+    return df.loc[~sob_encomenda].reset_index(drop=True), int(sob_encomenda.sum()), series
+
+
 def preparar_base(df: pd.DataFrame, escopo_buffer_mestre: tuple[str, ...] = ("Cliente",)) -> tuple[pd.DataFrame, int]:
     # o strip dos textos (Unidad etc.) já é feito na conversão para Parquet
     df, linhas_removidas = remover_componentes(df, escopo_buffer_mestre)

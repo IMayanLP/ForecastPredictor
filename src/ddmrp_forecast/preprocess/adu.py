@@ -12,15 +12,16 @@ def corrigir_dias_adu(df: pd.DataFrame, padrao: float = 30.0) -> tuple[pd.DataFr
     return df, int(zerados.sum())
 
 
-def recalcular_adu(df: pd.DataFrame, chave: tuple[str, ...]) -> pd.DataFrame:
+def recalcular_adu(df: pd.DataFrame, chave: tuple[str, ...], coluna: str = "Consumo",
+                   nome: str = "ADU_recalculado") -> pd.DataFrame:
     grupos = agrupar_series(df, chave)
     dias_adu = np.trunc(grupos["DiasADU"].transform("first"))
-    anterior = grupos["Consumo"].shift(1)
+    anterior = grupos[coluna].shift(1)
     codigos = grupos.ngroup()
 
     adu = pd.Series(np.nan, index=df.index)
     for dias in dias_adu[dias_adu > 0].unique():
         linhas = dias_adu == dias
         adu[linhas] = media_movel_por_codigo(anterior[linhas], codigos[linhas], int(dias), int(dias))
-    df["ADU_recalculado"] = adu
+    df[nome] = adu
     return df
