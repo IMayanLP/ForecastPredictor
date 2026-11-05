@@ -101,8 +101,39 @@ PARAMETROS_ARVORES = {
 }
 # Hurdle etapa 1: P(alguma venda em [t, t+H-1]) | etapa 2: log(alvo / escala) nas linhas com venda (mediana)
 PARAMETROS_CLASSIFICADOR = PARAMETROS_ARVORES | {"objective": "binary"}
-PARAMETROS_REGRESSOR = PARAMETROS_ARVORES | {"objective": "regression_l1"}
+PARAMETROS_REGRESSOR = PARAMETROS_ARVORES | {"objective": "regression_l1", "metric": "l1"}
 # Modelo de uma etapa (treinar_lgbm), mantido para comparação
 PARAMETROS_LGBM = PARAMETROS_ARVORES | {"objective": "tweedie", "tweedie_variance_power": 1.3}
 RODADAS_MAXIMAS = 2_000
 PARADA_ANTECIPADA = 100
+
+# --- Busca de hiperparâmetros (etapa do treino: roda a cada execução do main) ---
+# Base pronta (features + Alvo + Base) gravada pelo main, um arquivo por conjunto de CLIENTES
+PASTA_FEATURES = RAIZ_PROJETO / "data" / "features"
+REAPROVEITAR_BASE = False   # True: lê a base salva dos mesmos CLIENTES e pula as etapas 1–8
+# Registro por base: <clientes>_<id>/tentativas.jsonl; a mesma base retoma de onde parou, base nova abre outro
+PASTA_BUSCA = PASTA_MODELO / "busca"
+BUSCAR_HIPERPARAMETROS = True   # False: treina direto com PARAMETROS_CLASSIFICADOR / PARAMETROS_REGRESSOR
+# Tentativa 0 de cada etapa = parâmetros acima (referência); as demais sorteiam ESPACO_BUSCA sobre eles
+TENTATIVAS_CLASSIFICADOR = 40   # escolha por log loss na validação
+TENTATIVAS_REGRESSOR = 60       # escolha pelo WAPE do tamanho na validação (linhas com consumo)
+SEMENTE_BUSCA = 2026
+# Os MELHORES_POR_ETAPA de cada etapa são combinados e avaliados pelo WAPE mediano por série; as melhores
+# combinações são repetidas com seed + SEMENTES_EXTRAS e vence a média. Combinação cujo WAPE global piora mais
+# que TOLERANCIA_WAPE_GLOBAL contra os parâmetros acima é descartada
+MELHORES_POR_ETAPA = 3
+SEMENTES_EXTRAS = (1, 2)
+TOLERANCIA_WAPE_GLOBAL = 0.02
+# (tipo, limites): real/log_real/log_int entre mínimo e máximo; zero_ou_log = 0 em 1/3 das vezes; escolha = lista
+ESPACO_BUSCA = {
+    "learning_rate": ("log_real", 0.02, 0.1),
+    "num_leaves": ("log_int", 15, 255),
+    "max_depth": ("escolha", (-1, 4, 6, 8, 10, 12)),
+    "min_data_in_leaf": ("log_int", 20, 2_000),
+    "feature_fraction": ("real", 0.5, 1.0),
+    "bagging_fraction": ("real", 0.5, 1.0),
+    "lambda_l1": ("zero_ou_log", 1e-3, 10.0),
+    "lambda_l2": ("zero_ou_log", 1e-3, 10.0),
+    "min_gain_to_split": ("real", 0.0, 1.0),
+}
+ESPACO_BUSCA_REGRESSOR = ESPACO_BUSCA | {"objective": ("escolha", ("regression_l1", "huber", "regression"))}

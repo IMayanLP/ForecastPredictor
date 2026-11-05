@@ -1,12 +1,17 @@
-﻿import time
+﻿import json
+import time
+
+import pandas as pd
 
 from ddmrp_forecast.config.settings import (
-    ALFA_INTERMITENCIA, BASELINES, CHAVE_SERIE, CLIENTES, COLUNA_ALVO, COLUNA_FEATURES, COLUNAS_ESCALA, COLUNAS_FIXAS,
-    DATA_INICIO, DATEFIRST_SQL, DIAS_ADU_PADRAO, DIAS_TESTE, DIAS_VALIDACAO, ESCOPO_BUFFER_MESTRE, FATOR_IQR, FEATURES,
-    HORIZONTE_DIAS, JANELA_LIMPEZA, JANELAS_FREQUENCIA, JANELAS_MEDIA, LAGS, PARADA_ANTECIPADA,
-    PARAMETROS_CLASSIFICADOR, PARAMETROS_REGRESSOR, PASTA_MODELO, PASTA_RAW, PASTA_SOURCE, PREFIXOS_ESCALAVEIS,
-    QUARTIS_SO_COM_CONSUMO, RODADAS_MAXIMAS, SUBSTITUICAO_PICO, SUFIXOS_SOB_ENCOMENDA, TAMANHO_LOTE, TIPO_FEATURES,
-    VENDAS_MINIMAS,
+    ALFA_INTERMITENCIA, BASELINES, BUSCAR_HIPERPARAMETROS, CHAVE_SERIE, CLIENTES, COLUNA_ALVO, COLUNA_FEATURES,
+    COLUNAS_ESCALA, COLUNAS_FIXAS, DATA_INICIO, DATEFIRST_SQL, DIAS_ADU_PADRAO, DIAS_TESTE, DIAS_VALIDACAO,
+    ESCOPO_BUFFER_MESTRE, ESPACO_BUSCA, ESPACO_BUSCA_REGRESSOR, FATOR_IQR, FEATURES, HORIZONTE_DIAS, JANELA_LIMPEZA,
+    JANELAS_FREQUENCIA, JANELAS_MEDIA, LAGS, MELHORES_POR_ETAPA, PARADA_ANTECIPADA, PARAMETROS_CLASSIFICADOR,
+    PARAMETROS_REGRESSOR, PASTA_BUSCA, PASTA_FEATURES, PASTA_MODELO, PASTA_RAW, PASTA_SOURCE, PREFIXOS_ESCALAVEIS,
+    QUARTIS_SO_COM_CONSUMO, REAPROVEITAR_BASE, RODADAS_MAXIMAS, SEMENTE_BUSCA, SEMENTES_EXTRAS, SUBSTITUICAO_PICO,
+    SUFIXOS_SOB_ENCOMENDA, TAMANHO_LOTE, TENTATIVAS_CLASSIFICADOR, TENTATIVAS_REGRESSOR, TIPO_FEATURES,
+    TOLERANCIA_WAPE_GLOBAL, VENDAS_MINIMAS,
 )
 from ddmrp_forecast.features.datas import adicionar_partes_da_data
 from ddmrp_forecast.features.defasagens import criar_lags, criar_medias_moveis
@@ -15,9 +20,12 @@ from ddmrp_forecast.io.parquet_store import ler_series_com_venda
 from ddmrp_forecast.io.conversao import converter_pasta
 from ddmrp_forecast.io.validacao import resumir_periodo, validar_consumos
 from ddmrp_forecast.model.alvo import criar_alvo
-from ddmrp_forecast.model.metricas import comparar_modelos, metricas_por_serie
+from ddmrp_forecast.model.metricas import comparar_modelos, comparar_por_segmento, metricas_por_serie, segmentar_abc
 from ddmrp_forecast.model.split import datas_corte, resumir_bases, separar_bases
-from ddmrp_forecast.model.hurdle import calcular_escala, prever_hurdle, treinar_hurdle
+from ddmrp_forecast.model.busca import executar_busca, identificar_base
+from ddmrp_forecast.model.hurdle import (
+    calcular_escala, montar_matrizes, prever_hurdle, treinar_classificador, treinar_regressor,
+)
 from ddmrp_forecast.model.treino import importancia
 from ddmrp_forecast.preprocess.adu import corrigir_dias_adu, recalcular_adu
 from ddmrp_forecast.preprocess.auditoria import auditar_adu, auditar_features, auditar_picos
@@ -33,7 +41,11 @@ def etapa(nome: str, inicio: float) -> float:
     return time.time()
 
 
-def main() -> None:
+def nome_base(clientes: str | tuple[str, ...]) -> str:
+    return "_".join(sorted((clientes,) if isinstance(clientes, str) else clientes)).lower()
+
+
+def montar_base() -> pd.DataFrame:
     # 1) .rpt/.csv → Parquet (só converte o que for novo ou alterado)
     converter_pasta(PASTA_SOURCE, PASTA_RAW, TAMANHO_LOTE, CLIENTES)
 
@@ -122,17 +134,44 @@ def main() -> None:
           f"({df.memory_usage(deep=True).sum() / 1e9:,.2f} GB)")
     print(df.head(10).to_string())
 
-    # 9) treinamento: alvo à frente, split temporal, hurdle (P(consumo) × tamanho) e comparação no teste
-    inicio = time.time()
+    # 9) alvo à frente e split temporal; a base fica só com o que o treino e as métricas usam
     df = criar_alvo(df, CHAVE_SERIE, COLUNA_ALVO, HORIZONTE_DIAS)
-    base = separar_bases(df, HORIZONTE_DIAS, inicio_validacao, inicio_teste)
+    df["Base"] = separar_bases(df, HORIZONTE_DIAS, inicio_validacao, inicio_teste)
+    colunas = [*CHAVE_SERIE, "Data", "Consumo", COLUNA_ALVO, "EhPico", "Descripcion", "Alvo", "Base", *BASELINES,
+               *FEATURES, *COLUNAS_ESCALA]
+    return df[list(dict.fromkeys(colunas))]
+
+
+def treinar(df: pd.DataFrame) -> None:
+    # 10) busca de hiperparâmetros na validação, treino final e comparação no teste (uma vez, com o vencedor)
+    inicio = time.time()
+    base = df["Base"]
     print(f"Alvo: média de {COLUNA_ALVO} nos próximos {HORIZONTE_DIAS} dias")
     print(resumir_bases(df, base).to_string())
 
     escala = calcular_escala(df, COLUNAS_ESCALA)
     print(f"Linhas sem escala ({'/'.join(COLUNAS_ESCALA)} = 0, previsão 0 e fora do treino): {(escala == 0).sum():,}")
-    classificador, regressor = treinar_hurdle(df, base, FEATURES, PREFIXOS_ESCALAVEIS, escala, PARAMETROS_CLASSIFICADOR,
-                                              PARAMETROS_REGRESSOR, RODADAS_MAXIMAS, PARADA_ANTECIPADA)
+    matrizes = montar_matrizes(df, base, FEATURES, PREFIXOS_ESCALAVEIS, escala)
+    if BUSCAR_HIPERPARAMETROS:
+        configuracao = {"features": FEATURES, "prefixos": PREFIXOS_ESCALAVEIS, "escala": COLUNAS_ESCALA,
+                        "classificador": PARAMETROS_CLASSIFICADOR, "regressor": PARAMETROS_REGRESSOR,
+                        "espaco": ESPACO_BUSCA, "espaco_regressor": ESPACO_BUSCA_REGRESSOR, "semente": SEMENTE_BUSCA,
+                        "rodadas": RODADAS_MAXIMAS, "parada": PARADA_ANTECIPADA, "melhores": MELHORES_POR_ETAPA,
+                        "sementes_extras": SEMENTES_EXTRAS, "tolerancia": TOLERANCIA_WAPE_GLOBAL}
+        pasta = PASTA_BUSCA / f"{nome_base(CLIENTES)}_{identificar_base(df, base, configuracao)}"
+        busca = executar_busca(df, base, matrizes, CHAVE_SERIE, COLUNA_ALVO, escala, pasta, PARAMETROS_CLASSIFICADOR,
+                               PARAMETROS_REGRESSOR, ESPACO_BUSCA, ESPACO_BUSCA_REGRESSOR, TENTATIVAS_CLASSIFICADOR,
+                               TENTATIVAS_REGRESSOR, SEMENTE_BUSCA, MELHORES_POR_ETAPA, SEMENTES_EXTRAS,
+                               TOLERANCIA_WAPE_GLOBAL, RODADAS_MAXIMAS, PARADA_ANTECIPADA)
+        modelos = busca.pop("modelos")
+        print(f"Vencedor: classificador {busca['classificador']}, regressor {busca['regressor']} (registro em {pasta})")
+        inicio = etapa("busca", inicio)
+    else:
+        busca = {"parametros_classificador": PARAMETROS_CLASSIFICADOR, "parametros_regressor": PARAMETROS_REGRESSOR}
+        modelos = {"vencedor": (treinar_classificador(matrizes, PARAMETROS_CLASSIFICADOR, RODADAS_MAXIMAS, PARADA_ANTECIPADA),
+                                treinar_regressor(matrizes, PARAMETROS_REGRESSOR, RODADAS_MAXIMAS, PARADA_ANTECIPADA))}
+    del matrizes
+    classificador, regressor = modelos["vencedor"]
     for nome, modelo in [("Etapa 1 — classificador (P(consumo))", classificador),
                          ("Etapa 2 — regressor (tamanho)", regressor)]:
         print(f"{nome}: melhor rodada {modelo.best_iteration:,}")
@@ -144,13 +183,24 @@ def main() -> None:
     teste = teste.loc[:, ~teste.columns.duplicated()].copy()
     teste["Previsao"], teste["Probabilidade"] = prever_hurdle(classificador, regressor, df, FEATURES,
                                                              PREFIXOS_ESCALAVEIS, escala, linhas_teste)
+    # parâmetros de settings como concorrente: mostra o ganho da busca no teste
+    padrao = ("PrevisaoPadrao",) if "padrao" in modelos else ()
+    if padrao:
+        teste["PrevisaoPadrao"] = prever_hurdle(*modelos["padrao"], df, FEATURES, PREFIXOS_ESCALAVEIS, escala,
+                                                linhas_teste)[0]
     inicio = etapa("treinamento", inicio)
 
-    concorrentes = ("Previsao", *BASELINES)
+    concorrentes = ("Previsao", *padrao, *BASELINES)
     comuns = teste[list(BASELINES)].notna().all(axis=1)
     por_serie = metricas_por_serie(teste[comuns], CHAVE_SERIE, concorrentes)
     print(f"Teste — linhas com todos os baselines ({comuns.sum():,} de {len(teste):,}):")
     print(comparar_modelos(por_serie, CHAVE_SERIE, "Previsao").to_string(float_format="{:,.4f}".format))
+    # segmentos ABC pelo volume antes do teste
+    segmentos = segmentar_abc(df, CHAVE_SERIE, COLUNA_ALVO, (df["Data"] < teste["Data"].min()).to_numpy())
+    print("Teste — WAPE mediano por série em cada segmento ABC (volume antes do teste: A = 80%, B = 80–95%):")
+    print(comparar_por_segmento(por_serie, CHAVE_SERIE, segmentos).to_string(float_format="{:,.4f}".format))
+    por_serie = por_serie.join(segmentos, on=list(CHAVE_SERIE))
+    por_serie["Segmento"] = por_serie["Segmento"].fillna("C")
     print("Teste — modelo em todas as linhas:")
     print(comparar_modelos(metricas_por_serie(teste, CHAVE_SERIE, ("Previsao",)), CHAVE_SERIE, "Previsao")
           .to_string(float_format="{:,.4f}".format))
@@ -160,8 +210,23 @@ def main() -> None:
     regressor.save_model(PASTA_MODELO / "hurdle_regressor.txt", num_iteration=regressor.best_iteration)
     teste.to_parquet(PASTA_MODELO / "teste_previsoes.parquet", index=False)
     por_serie.to_parquet(PASTA_MODELO / "metricas_por_serie.parquet", index=False)
-    print(f"Modelo, previsões do teste e métricas por série em {PASTA_MODELO}")
+    (PASTA_MODELO / "hiperparametros.json").write_text(json.dumps(busca, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Modelo, hiperparâmetros, previsões do teste e métricas por série em {PASTA_MODELO}")
     etapa("métricas", inicio)
+
+
+def main() -> None:
+    caminho_base = PASTA_FEATURES / f"{nome_base(CLIENTES)}.parquet"
+    if REAPROVEITAR_BASE and caminho_base.exists():
+        inicio = time.time()
+        df = pd.read_parquet(caminho_base)
+        etapa(f"base salva lida de {caminho_base} ({len(df):,} linhas)", inicio)
+    else:
+        df = montar_base()
+        PASTA_FEATURES.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(caminho_base, index=False, compression="zstd")
+        print(f"Base gravada em {caminho_base}")
+    treinar(df)
 
 
 if __name__ == "__main__":

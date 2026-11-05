@@ -43,3 +43,30 @@ def comparar_modelos(por_serie: pd.DataFrame, chave: tuple[str, ...], referencia
         for m in total.index
     ]
     return total[["Linhas", "MAE", "RMSE", "WAPE", "Vies", "WAPEMedianoSerie", f"{referencia}Vence%"]]
+
+
+def segmentar_abc(df: pd.DataFrame, chave: tuple[str, ...], coluna: str, linhas: np.ndarray,
+                  cortes: tuple[float, float] = (0.8, 0.95)) -> pd.Series:
+    # A = séries que formam os primeiros 80% do volume, B até 95%, C o resto (inclusive sem venda)
+    volume = df.loc[linhas].groupby(list(chave), observed=True, sort=False)[coluna].sum().sort_values(ascending=False)
+    antes = (volume.cumsum() / volume.sum()).shift(fill_value=0).fillna(1)
+    segmento = np.select([antes < cortes[0], antes < cortes[1]], ["A", "B"], "C")
+    return pd.Series(segmento, index=volume.index, name="Segmento")
+
+
+def medianas_por_segmento(por_serie: pd.DataFrame, chave: tuple[str, ...], segmentos: pd.Series) -> dict[str, float]:
+    # WAPE mediano por série dentro de cada segmento; série fora da segmentação conta como C
+    segmento = por_serie.join(segmentos, on=list(chave))["Segmento"].fillna("C")
+    return por_serie.groupby(segmento.to_numpy())["WAPE"].median().to_dict()
+
+
+def comparar_por_segmento(por_serie: pd.DataFrame, chave: tuple[str, ...], segmentos: pd.Series) -> pd.DataFrame:
+    # WAPE mediano por série de cada modelo dentro de A/B/C (+ quantas séries com venda em cada segmento)
+    por_serie = por_serie.reset_index(drop=True)
+    por_serie["Segmento"] = por_serie.join(segmentos, on=list(chave))["Segmento"].fillna("C")
+    tabela = por_serie.groupby(["Modelo", "Segmento"], sort=False)["WAPE"].median().unstack()
+    series = por_serie[(por_serie["Modelo"] == por_serie["Modelo"].iloc[0]) & por_serie["WAPE"].notna()]
+    contagem = series.groupby("Segmento").size()
+    tabela = tabela.reindex(columns=sorted(tabela.columns))
+    tabela.columns = [f"WAPEMediano{s} ({contagem.get(s, 0):,} séries)" for s in tabela.columns]
+    return tabela
