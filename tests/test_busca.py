@@ -144,6 +144,27 @@ def test_segmentacao_abc():
     assert tabela.loc["M1"].tolist() == [0.1, 0.2, 0.7] and tabela.loc["M2"].tolist() == [0.2, 0.4, 1.4]
 
 
+def test_segmentacao_abc_por_cliente():
+    # cliente pequeno tem a sua própria curva: no ABC conjunto ele cairia todo em C
+    grande = pd.DataFrame({"Cliente": "g", "IdBodega": 1, "Referencia": ["A1", "B1", "C1"],
+                           "Consumo_Limpo": [8000.0, 1500.0, 500.0]})
+    pequeno = pd.DataFrame({"Cliente": "p", "IdBodega": 1, "Referencia": ["A1", "B1", "C1", "Z"],
+                            "Consumo_Limpo": [80.0, 15.0, 5.0, 0.0]})
+    df = pd.concat([grande, pequeno], ignore_index=True)
+    segmentos = segmentar_abc(df, CHAVE_SERIE, "Consumo_Limpo", np.ones(len(df), bool))
+    for cliente in ("g", "p"):
+        parte = segmentos.xs(cliente, level="Cliente").droplevel("IdBodega")
+        assert parte[["A1", "B1", "C1"]].tolist() == ["A", "B", "C"]
+    assert segmentos.xs("Z", level="Referencia").iloc[0] == "C"
+    # cada cliente sozinho dá a mesma segmentação que junto
+    sozinho = segmentar_abc(pequeno, CHAVE_SERIE, "Consumo_Limpo", np.ones(len(pequeno), bool))
+    assert sozinho.sort_index().equals(segmentos.xs("p", level="Cliente", drop_level=False).sort_index())
+    # sem por cliente, o pequeno inteiro cairia em C
+    conjunto = segmentar_abc(df.assign(Todos="t").set_index("Todos").reset_index(), ("Todos", "Cliente", "Referencia"),
+                             "Consumo_Limpo", np.ones(len(df), bool), por="Todos")
+    assert set(conjunto.xs("p", level="Cliente")) == {"C"}
+
+
 def test_modelo_salvo_preve_igual():
     df, base = base_sintetica()
     escala = calcular_escala(df, ESCALA)
@@ -217,6 +238,7 @@ if __name__ == "__main__":
     test_registro_retomavel()
     test_etapas_reproduzem_hurdle_original()
     test_segmentacao_abc()
+    test_segmentacao_abc_por_cliente()
     test_modelo_salvo_preve_igual()
     test_busca_escolhe_pela_validacao()
     print("Busca: OK")

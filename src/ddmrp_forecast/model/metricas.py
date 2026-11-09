@@ -46,12 +46,17 @@ def comparar_modelos(por_serie: pd.DataFrame, chave: tuple[str, ...], referencia
 
 
 def segmentar_abc(df: pd.DataFrame, chave: tuple[str, ...], coluna: str, linhas: np.ndarray,
-                  cortes: tuple[float, float] = (0.8, 0.95)) -> pd.Series:
-    # A = séries que formam os primeiros 80% do volume, B até 95%, C o resto (inclusive sem venda)
-    volume = df.loc[linhas].groupby(list(chave), observed=True, sort=False)[coluna].sum().sort_values(ascending=False)
-    antes = (volume.cumsum() / volume.sum()).shift(fill_value=0).fillna(1)
+                  cortes: tuple[float, float] = (0.8, 0.95), por: str = "Cliente") -> pd.Series:
+    # A = séries que formam os primeiros 80% do volume do próprio cliente (`por`), B até 95%, C o resto
+    # (inclusive sem venda): cada cliente tem a sua curva ABC
+    volume = df.loc[linhas].groupby(list(chave), observed=True, sort=False)[coluna].sum()
+    ordem = pd.DataFrame({"Grupo": volume.index.get_level_values(por), "Volume": volume.to_numpy()}, index=volume.index)
+    ordem = ordem.sort_values(["Grupo", "Volume"], ascending=[True, False], kind="stable")
+    grupos = ordem.groupby("Grupo", observed=True, sort=False)["Volume"]
+    acumulado = grupos.cumsum() / grupos.transform("sum")
+    antes = acumulado.groupby(ordem["Grupo"], observed=True, sort=False).shift(fill_value=0).fillna(1)
     segmento = np.select([antes < cortes[0], antes < cortes[1]], ["A", "B"], "C")
-    return pd.Series(segmento, index=volume.index, name="Segmento")
+    return pd.Series(segmento, index=ordem.index, name="Segmento")
 
 
 def medianas_por_segmento(por_serie: pd.DataFrame, chave: tuple[str, ...], segmentos: pd.Series) -> dict[str, float]:
