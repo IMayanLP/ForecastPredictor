@@ -137,3 +137,51 @@ ESPACO_BUSCA = {
     "min_gain_to_split": ("real", 0.0, 1.0),
 }
 ESPACO_BUSCA_REGRESSOR = ESPACO_BUSCA | {"objective": ("escolha", ("regression_l1", "huber", "regression"))}
+
+# --- Confiabilidade da previsão (não muda a previsão: FEATURES e busca ficam intactas) ---
+# Acertou = |previsão - alvo| <= TOLERANCIA_ACERTO * max(alvo, escala); vale com alvo 0 e não depende da unidade
+TOLERANCIA_ACERTO = 0.30
+# Sobre COLUNA_FEATURES, até t-1: intervalos entre as últimas vendas, tamanho da venda e picos na janela de dias
+JANELA_INTERVALOS = 12
+JANELA_TAMANHO = 365
+JANELA_PICOS = 90
+FEATURES_SERIE_CONFIABILIDADE = (
+    f"ADI_{JANELA_INTERVALOS}", f"CV2Intervalo_{JANELA_INTERVALOS}", f"CV2Tamanho_{JANELA_TAMANHO}",
+    f"PicosRecentes_{JANELA_PICOS}",
+)
+# Todas sem unidade, para valer entre clientes: fora LogEscala e segmento ABC
+FEATURES_CONFIABILIDADE = (
+    "Freq_28", "Freq_90", "Freq_365", "DiasDesdeVenda", "DiasHistorico", *FEATURES_SERIE_CONFIABILIDADE,
+    "Probabilidade", "PrevSobreEscala",
+)
+# Classes por faixas fixas da %; TipoPrevisao = "Com consumo" quando Probabilidade >= corte
+CORTES_CLASSES = (0.2, 0.4, 0.6, 0.8)
+ROTULOS_CLASSES = ("Muito baixa", "Baixa", "Média", "Alta", "Muito alta")
+CORTE_TIPO_PREVISAO = 0.5
+# Ajuste só na validação; a isotônica calibra com previsões fora da dobra (dobras por série)
+PARAMETROS_CONFIABILIDADE = {
+    "objective": "binary",
+    "learning_rate": 0.03,
+    "num_leaves": 15,
+    "min_data_in_leaf": 200,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 1,
+    "lambda_l2": 5.0,
+    "seed": 42,
+    "verbose": -1,
+}
+DOBRAS_CONFIABILIDADE = 5
+RODADAS_CONFIABILIDADE = 600
+PARADA_CONFIABILIDADE = 50
+# Regras simples a bater: taxa de acerto da validação em cada faixa (corte da faixa, valor para NaN)
+REGRAS_CONFIABILIDADE = {
+    "Só Freq_90": ("Freq_90",),
+    "Só ABC": ("Segmento",),
+    "Freq_90 × ABC": ("Freq_90", "Segmento"),
+    "Freq_90 × recência": ("Freq_90", "DiasDesdeVenda"),
+}
+FAIXAS_REGRAS = {"Freq_90": ((0.02, 0.05, 0.1, 0.25), -1.0), "DiasDesdeVenda": ((7, 28, 90, 365), float("inf"))}
+# Relatório: classe com menos linhas fica fora da checagem de monotonia
+LINHAS_MINIMAS_CLASSE = 100
+REPETICOES_BOOTSTRAP = 500
