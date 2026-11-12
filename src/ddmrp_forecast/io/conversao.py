@@ -14,7 +14,7 @@ LEITORES = {".rpt": ler_rpt_em_lotes, ".csv": ler_csv_em_lotes}
 
 def listar_fontes(pasta: str | Path, clientes: tuple[str, ...] | None = None) -> list[Path]:
     arquivos = sorted(a for a in Path(pasta).rglob("*") if a.suffix.lower() in LEITORES)
-    arquivos = filtrar_por_cliente(arquivos, clientes)
+    arquivos = filtrar_por_cliente(arquivos, clientes, pasta)
     if not arquivos:
         raise FileNotFoundError(f"Nenhum {'/'.join(LEITORES)} em {pasta} para os clientes {clientes}")
 

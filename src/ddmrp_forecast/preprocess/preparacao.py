@@ -15,6 +15,16 @@ def zerar_consumos_negativos(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return df, int(negativos.sum())
 
 
+def remover_duplicados_identicos(df: pd.DataFrame, chave: tuple[str, ...]) -> tuple[pd.DataFrame, int]:
+    # a exportação pode repetir a linha inteira (série, Data e todos os valores): fica uma cópia.
+    # Repetição com valores diferentes continua sendo erro (verificar_ordenacao)
+    repetida = df.duplicated([*chave, "Data"], keep=False).to_numpy()
+    if not repetida.any():
+        return df, 0
+    trecho = df.loc[repetida]
+    copia = trecho.duplicated(keep="first").to_numpy()
+    return df.drop(index=trecho.index[copia]).reset_index(drop=True), int(copia.sum())
+
 def remover_sob_encomenda(df: pd.DataFrame, chave: tuple[str, ...],
                           sufixos: tuple[str, ...]) -> tuple[pd.DataFrame, int, int]:
     # perfis DDMRP "sob encomenda" (Descripcion terminada em TO: MTO, PTO, DTO...) não têm forecast

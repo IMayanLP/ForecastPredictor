@@ -1,4 +1,4 @@
-# Alvo à frente, split temporal sem vazamento, quartis só do treino, métricas e treino rápido.
+﻿# Alvo à frente, split temporal sem vazamento, quartis só do treino, métricas e treino rápido.
 # Rodar: .venv/Scripts/python.exe tests/test_modelo.py  (ou pytest, se instalado)
 
 import sys
@@ -17,7 +17,9 @@ from ddmrp_forecast.features.intermitencia import criar_frequencias, criar_recen
 from ddmrp_forecast.model.hurdle import calcular_escala, prever_hurdle, treinar_hurdle  # noqa: E402
 from ddmrp_forecast.model.alvo import criar_alvo  # noqa: E402
 from ddmrp_forecast.model.metricas import comparar_modelos, metricas_por_serie  # noqa: E402
-from ddmrp_forecast.model.split import UM_DIA, datas_corte, separar_bases  # noqa: E402
+from ddmrp_forecast.model.split import (  # noqa: E402
+    UM_DIA, datas_corte, datas_corte_por_cliente, inicio_da_base, por_linha, separar_bases,
+)
 from ddmrp_forecast.model.treino import prever, treinar_lgbm  # noqa: E402
 from ddmrp_forecast.preprocess.adu import recalcular_adu  # noqa: E402
 from ddmrp_forecast.preprocess.auditoria import auditar_features, auditar_picos  # noqa: E402
@@ -62,6 +64,44 @@ def test_split_sem_sobreposicao():
     # A: 34 dias de teste com janela completa (40 - 7 + 1); B acaba antes do teste
     assert (base[df["Referencia"] == "A"] == "teste").sum() == 34
     assert (base[df["Referencia"] == "B"] == "teste").sum() == 0
+
+
+def test_split_por_cliente():
+    # exportações que terminam em datas diferentes: cada cliente tem o seu teste nos próprios últimos dias
+    horizonte = 7
+    k = base_diaria({"A": list(range(200)), "B": [1.0] * 150})
+    h = base_diaria({"A": [2.0] * 230}, inicio="2026-02-15").assign(Cliente="H")
+    df = pd.concat([k, h], ignore_index=True)
+    df["Cliente"] = df["Cliente"].astype("category")
+    df = criar_alvo(df, CHAVE_SERIE, "Consumo_Limpo", horizonte)
+    cortes = datas_corte_por_cliente(df, 40, 30)
+    for cliente, parte in df.groupby("Cliente", observed=True):
+        validacao, teste = datas_corte(parte["Data"].max(), 40, 30)
+        assert cortes.loc[cliente, "InicioValidacao"] == validacao and cortes.loc[cliente, "InicioTeste"] == teste
+    assert cortes.loc["H", "InicioTeste"] > cortes.loc["K", "InicioTeste"]
+
+    inicio_validacao = por_linha(df, cortes["InicioValidacao"])
+    inicio_teste = por_linha(df, cortes["InicioTeste"])
+    base = separar_bases(df, horizonte, inicio_validacao, inicio_teste)
+    fim_janela = df["Data"] + (horizonte - 1) * UM_DIA
+    for cliente in ("K", "H"):
+        linhas = df["Cliente"] == cliente
+        validacao, teste = cortes.loc[cliente, ["InicioValidacao", "InicioTeste"]]
+        assert (fim_janela[linhas & (base == "treino")] < validacao).all()
+        assert (df["Data"][linhas & (base == "validacao")] >= validacao).all()
+        assert (fim_janela[linhas & (base == "validacao")] < teste).all()
+        assert (df["Data"][linhas & (base == "teste")] >= teste).all()
+        # todo cliente aparece nas três bases, com o teste do tamanho certo (40 dias - janela do alvo)
+        assert set(base[linhas].dropna().unique()) == {"treino", "validacao", "teste"}
+        assert df.loc[linhas & (base == "teste"), "Data"].nunique() == 40 - horizonte + 1
+    # com o corte único (data mais recente de todos), K perderia o teste
+    unico = separar_bases(df, horizonte, *datas_corte(df["Data"].max(), 40, 30))
+    assert (unico[df["Cliente"] == "K"] == "teste").sum() == 0
+
+    linhas_teste = (base == "teste").fillna(False).to_numpy()
+    assert (inicio_da_base(df, linhas_teste) == inicio_teste).all()
+    # mesmo resultado com Cliente em texto
+    assert (por_linha(df.assign(Cliente=df["Cliente"].astype(str)), cortes["InicioTeste"]) == inicio_teste).all()
 
 
 def test_quartis_so_do_treino():
@@ -286,6 +326,7 @@ def test_treino_aprende_sinal():
 if __name__ == "__main__":
     test_alvo_a_frente()
     test_split_sem_sobreposicao()
+    test_split_por_cliente()
     test_quartis_so_do_treino()
     test_adu_sobre_consumo_limpo()
     test_features_sem_picos()

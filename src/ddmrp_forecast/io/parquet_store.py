@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -20,9 +21,9 @@ def ler_parquet(pasta: str | Path, colunas: list[str] | None = None,
 
     colunas: lê só as colunas indicadas.
     filtros: ex. [("Cliente", "==", "ACME")] — filtra antes de carregar.
-    clientes: lista branca — só arquivos cujo nome contém um dos clientes. None = todos.
+    clientes: lista branca — só arquivos cujo caminho (pasta ou nome) contém um dos clientes. None = todos.
     """
-    arquivos = filtrar_por_cliente(sorted(Path(pasta).rglob("*.parquet")), clientes)
+    arquivos = filtrar_por_cliente(sorted(Path(pasta).rglob("*.parquet")), clientes, pasta)
     if not arquivos:
         raise FileNotFoundError(f"Nenhum Parquet em {pasta} para os clientes {clientes}")
 
@@ -54,18 +55,32 @@ def contar_vendas_por_serie(arquivos: list[Path], chave: tuple[str, ...],
     )
 
 
+def sortear_series(series: pd.DataFrame, chave: tuple[str, ...], fracoes: dict[str, float],
+                   sempre: np.ndarray) -> pd.DataFrame:
+    # amostra fixa por cliente (ex.: {"hennings": 0.12}): o sorteio vem do hash da chave, então a mesma série
+    # fica dentro ou fora em toda execução, sozinha ou com outros clientes; cliente fora do dicionário = todas
+    fracao = (series["Cliente"].astype(str).str.lower().map({c.lower(): f for c, f in fracoes.items()})
+              .fillna(1.0).to_numpy())
+    sorteio = pd.util.hash_pandas_object(series[list(chave)].astype(str), index=False).to_numpy() / 2.0 ** 64
+    return series.loc[(sorteio < fracao) | sempre]
+
+
 def ler_series_com_venda(pasta: str | Path, clientes: tuple[str, ...] | str | None, chave: tuple[str, ...],
                          data_inicio: pd.Timestamp | None = None, vendas_minimas: int = 1,
-                         prefixo_mestre: str = "#", tamanho_lote: int = 2_000_000) -> tuple[pd.DataFrame, dict[str, int]]:
+                         prefixo_mestre: str = "#", tamanho_lote: int = 2_000_000,
+                         amostra: dict[str, float] | None = None) -> tuple[pd.DataFrame, dict[str, int]]:
     # séries sem venda desde data_inicio não têm o que prever: ficam fora antes de carregar a base
     # buffers mestres entram sempre (remover_componentes precisa deles para tirar o componente)
-    arquivos = filtrar_por_cliente(sorted(Path(pasta).rglob("*.parquet")), clientes)
+    arquivos = filtrar_por_cliente(sorted(Path(pasta).rglob("*.parquet")), clientes, pasta)
     if not arquivos:
         raise FileNotFoundError(f"Nenhum Parquet em {pasta} para os clientes {clientes}")
 
     vendas = contar_vendas_por_serie(arquivos, chave, data_inicio)
-    mantidas = vendas.loc[(vendas["Vendas"] >= vendas_minimas)
-                          | vendas["Referencia"].str.startswith(prefixo_mestre, na=False), list(chave)]
+    mestre = vendas["Referencia"].str.startswith(prefixo_mestre, na=False)
+    mantidas = vendas.loc[(vendas["Vendas"] >= vendas_minimas) | mestre, list(chave)]
+    com_venda = len(mantidas)
+    if amostra:
+        mantidas = sortear_series(mantidas, chave, amostra, mestre.loc[mantidas.index].to_numpy())
     chaves = pa.Table.from_pandas(mantidas, preserve_index=False)
 
     # 2ª passada: lotes de cada arquivo, só linhas das séries mantidas
@@ -90,7 +105,8 @@ def ler_series_com_venda(pasta: str | Path, clientes: tuple[str, ...] | str | No
     resumo = {
         "séries no período": len(vendas),
         "séries mantidas": len(mantidas),
-        f"séries descartadas (< {vendas_minimas} venda(s))": len(vendas) - len(mantidas),
+        f"séries descartadas (< {vendas_minimas} venda(s))": len(vendas) - com_venda,
+        "séries fora da amostra": com_venda - len(mantidas),
         "linhas no período": int(vendas["Linhas"].sum()),
         "linhas mantidas": tabela.num_rows,
     }

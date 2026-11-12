@@ -11,6 +11,7 @@ from sklearn.metrics import roc_auc_score
 
 from ddmrp_forecast.model.hurdle import dados_classificador, dados_regressor, prever_matriz, treinar_etapa
 from ddmrp_forecast.model.metricas import comparar_modelos, medianas_por_segmento, metricas_por_serie, segmentar_abc
+from ddmrp_forecast.model.split import inicio_da_base
 
 # métrica de escolha (menor é melhor) de cada fase, sempre na validação
 METRICA_CLASSIFICADOR = "LogLoss"
@@ -130,8 +131,9 @@ def executar_busca(df: pd.DataFrame, base: pd.Series, matrizes: dict, chave: tup
     x_validacao_consumo = x_validacao[com_consumo]
     linhas_validacao = (base == "validacao").fillna(False).to_numpy()
     validacao = df.loc[linhas_validacao, [*chave, alvo]].assign(ComEscala=escala[linhas_validacao] > 0)
-    # segmentos pelo volume antes da validação (só o treino é conhecido na escolha)
-    segmentos = segmentar_abc(df, chave, coluna_volume, (df["Data"] < df.loc[linhas_validacao, "Data"].min()).to_numpy())
+    # segmentos pelo volume antes da validação de cada cliente (só o treino é conhecido na escolha)
+    antes_validacao = (df["Data"] < inicio_da_base(df, linhas_validacao)).to_numpy()
+    segmentos = segmentar_abc(df, chave, coluna_volume, antes_validacao)
 
     etapas = {
         "classificador": dict(dados=dados_classificador, parametros=parametros_classificador, espaco=espaco_classificador,

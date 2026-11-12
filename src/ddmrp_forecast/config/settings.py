@@ -15,6 +15,10 @@ CLIENTES = ("ceramfix")
 DATA_INICIO = "2020-01-01"
 VENDAS_MINIMAS = 1
 
+# Amostra fixa de séries por cliente (fração das séries com venda; sorteio pelo hash da chave, igual em toda execução).
+# Hennings: 47 mil séries / 85 M linhas não cabem em 16 GB de RAM. Cliente fora do dicionário = todas as séries
+AMOSTRA_SERIES = {"hennings": 0.12}
+
 # Linhas do .rpt processadas por vez (~0,5 GB de RAM por lote)
 TAMANHO_LOTE = 100_000
 

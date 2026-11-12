@@ -4,7 +4,8 @@ import time
 import pandas as pd
 
 from ddmrp_forecast.config.settings import (
-    ALFA_INTERMITENCIA, BASELINES, BUSCAR_HIPERPARAMETROS, CHAVE_SERIE, CLIENTES, COLUNA_ALVO, COLUNA_FEATURES,
+    ALFA_INTERMITENCIA, AMOSTRA_SERIES, BASELINES, BUSCAR_HIPERPARAMETROS, CHAVE_SERIE, CLIENTES, COLUNA_ALVO,
+    COLUNA_FEATURES,
     COLUNAS_ESCALA, COLUNAS_FIXAS, CORTE_TIPO_PREVISAO, CORTES_CLASSES, DATA_INICIO, DATEFIRST_SQL, DIAS_ADU_PADRAO,
     DIAS_TESTE, DIAS_VALIDACAO, DOBRAS_CONFIABILIDADE, ESCOPO_BUFFER_MESTRE, ESPACO_BUSCA, ESPACO_BUSCA_REGRESSOR,
     FAIXAS_REGRAS, FATOR_IQR, FEATURES, FEATURES_CONFIABILIDADE, FEATURES_SERIE_CONFIABILIDADE, HORIZONTE_DIAS,
@@ -30,7 +31,9 @@ from ddmrp_forecast.model.confiabilidade import (
     gravar_confiabilidade, marcar_acerto, preparar_sinais, relatorio_por_recorte, tipo_previsao,
 )
 from ddmrp_forecast.model.metricas import comparar_modelos, comparar_por_segmento, metricas_por_serie, segmentar_abc
-from ddmrp_forecast.model.split import datas_corte, resumir_bases, separar_bases
+from ddmrp_forecast.model.split import (
+    datas_corte_por_cliente, inicio_da_base, por_linha, resumir_bases, separar_bases,
+)
 from ddmrp_forecast.model.busca import executar_busca, identificar_base
 from ddmrp_forecast.model.hurdle import (
     calcular_escala, montar_matrizes, prever_hurdle, treinar_classificador, treinar_regressor,
@@ -41,7 +44,8 @@ from ddmrp_forecast.preprocess.auditoria import auditar_adu, auditar_features, a
 from ddmrp_forecast.preprocess.calendario import completar_calendario
 from ddmrp_forecast.preprocess.picos import limpar_picos, marcar_picos, resumir_picos
 from ddmrp_forecast.preprocess.preparacao import (
-    preparar_base, remover_sob_encomenda, verificar_ordenacao, zerar_consumos_negativos,
+    preparar_base, remover_duplicados_identicos, remover_sob_encomenda, verificar_ordenacao,
+    zerar_consumos_negativos,
 )
 
 
@@ -60,7 +64,8 @@ def montar_base() -> pd.DataFrame:
 
     # 2) leitura e checagem do Parquet
     inicio = time.time()
-    df, resumo_leitura = ler_series_com_venda(PASTA_RAW, CLIENTES, CHAVE_SERIE, DATA_INICIO, VENDAS_MINIMAS)
+    df, resumo_leitura = ler_series_com_venda(PASTA_RAW, CLIENTES, CHAVE_SERIE, DATA_INICIO, VENDAS_MINIMAS,
+                                              amostra=AMOSTRA_SERIES)
     print(f"Leitura a partir de {DATA_INICIO or 'todo o histórico'}:")
     for descricao, quantidade in resumo_leitura.items():
         print(f"  · {descricao}: {quantidade:,}")
@@ -71,13 +76,18 @@ def montar_base() -> pd.DataFrame:
         print(f"  ⚠ {problema}")
     if any(p.startswith("Colunas ausentes") for p in problemas):
         raise SystemExit("Base incompleta: corrigir a exportação do SSMS antes de seguir.")
+    df, duplicados = remover_duplicados_identicos(df, CHAVE_SERIE)
+    print(f"Linhas repetidas idênticas removidas: {duplicados:,}")
     df, negativos = zerar_consumos_negativos(df)
     print(f"Consumo negativo → 0: {negativos:,} registros")
     df, corrigidos = corrigir_dias_adu(df, DIAS_ADU_PADRAO)
     print(f"DiasADU 0 → {DIAS_ADU_PADRAO:g}: {corrigidos:,} registros")
     # fronteiras do split antes dos picos: os quartis só podem ver o período de treino
-    inicio_validacao, inicio_teste = datas_corte(df["Data"].max(), DIAS_TESTE, DIAS_VALIDACAO)
-    print(f"Validação a partir de {inicio_validacao:%Y-%m-%d}, teste a partir de {inicio_teste:%Y-%m-%d}")
+    # cada cliente tem o seu corte: teste nos últimos DIAS_TESTE dias da própria exportação
+    cortes = datas_corte_por_cliente(df, DIAS_TESTE, DIAS_VALIDACAO)
+    for cliente, corte in cortes.iterrows():
+        print(f"{cliente}: validação a partir de {corte['InicioValidacao']:%Y-%m-%d}, "
+              f"teste a partir de {corte['InicioTeste']:%Y-%m-%d}, dados até {corte['Fim']:%Y-%m-%d}")
     inicio = etapa("leitura", inicio)
 
     # 3) buffers mestres + ordenação
@@ -91,7 +101,8 @@ def montar_base() -> pd.DataFrame:
     inicio = etapa("buffers mestres", inicio)
 
     # 4) picos
-    df, _ = marcar_picos(df, CHAVE_SERIE, FATOR_IQR, QUARTIS_SO_COM_CONSUMO, ate=inicio_validacao)
+    df, _ = marcar_picos(df, CHAVE_SERIE, FATOR_IQR, QUARTIS_SO_COM_CONSUMO,
+                         ate=por_linha(df, cortes["InicioValidacao"]))
     print(df["EhPico"].value_counts().to_string())
     print(resumir_picos(df, CHAVE_SERIE).head(20).to_string())
     df = limpar_picos(df, CHAVE_SERIE, JANELA_LIMPEZA, SUBSTITUICAO_PICO)
@@ -145,7 +156,8 @@ def montar_base() -> pd.DataFrame:
 
     # 9) alvo à frente e split temporal; a base fica só com o que o treino e as métricas usam
     df = criar_alvo(df, CHAVE_SERIE, COLUNA_ALVO, HORIZONTE_DIAS)
-    df["Base"] = separar_bases(df, HORIZONTE_DIAS, inicio_validacao, inicio_teste)
+    df["Base"] = separar_bases(df, HORIZONTE_DIAS, por_linha(df, cortes["InicioValidacao"]),
+                               por_linha(df, cortes["InicioTeste"]))
     colunas = [*CHAVE_SERIE, "Data", "Consumo", COLUNA_ALVO, "EhPico", "Descripcion", "Alvo", "Base", *BASELINES,
                *FEATURES, *COLUNAS_ESCALA]
     return df[list(dict.fromkeys(colunas))]
@@ -198,8 +210,8 @@ def classificar_confiabilidade(df: pd.DataFrame, base: pd.Series, classificador,
     print(intervalo.to_string(float_format=formato))
 
     # regras simples nas mesmas linhas; segmentos da validação pelo volume antes dela
-    inicio_validacao = df.loc[linhas_validacao, "Data"].min()
-    segmentos_validacao = segmentar_abc(df, CHAVE_SERIE, COLUNA_ALVO, (df["Data"] < inicio_validacao).to_numpy())
+    antes_validacao = (df["Data"] < inicio_da_base(df, linhas_validacao)).to_numpy()
+    segmentos_validacao = segmentar_abc(df, CHAVE_SERIE, COLUNA_ALVO, antes_validacao)
     validacao = com_segmento(validacao, segmentos_validacao)
     validacao["Acerto"] = marcar_acerto(validacao["Alvo"].to_numpy(float), validacao["Previsao"].to_numpy(float),
                                         validacao["Escala"].to_numpy(float), TOLERANCIA_ACERTO)
@@ -216,6 +228,12 @@ def treinar(df: pd.DataFrame) -> None:
     base = df["Base"]
     print(f"Alvo: média de {COLUNA_ALVO} nos próximos {HORIZONTE_DIAS} dias")
     print(resumir_bases(df, base).to_string())
+    clientes = df["Cliente"].unique()
+    if len(clientes) > 1:
+        for cliente in clientes:
+            linhas = (df["Cliente"] == cliente).to_numpy()
+            print(f"Bases — {cliente}:")
+            print(resumir_bases(df.loc[linhas, ["Data", "Alvo"]], base[linhas]).to_string())
 
     escala = calcular_escala(df, COLUNAS_ESCALA)
     print(f"Linhas sem escala ({'/'.join(COLUNAS_ESCALA)} = 0, previsão 0 e fora do treino): {(escala == 0).sum():,}")
@@ -268,9 +286,15 @@ def treinar(df: pd.DataFrame) -> None:
     print(f"Teste — linhas com todos os baselines ({comuns.sum():,} de {len(teste):,}):")
     print(comparar_modelos(por_serie, CHAVE_SERIE, "Previsao").to_string(float_format="{:,.4f}".format))
     # segmentos ABC pelo volume antes do teste
-    segmentos = segmentar_abc(df, CHAVE_SERIE, COLUNA_ALVO, (df["Data"] < teste["Data"].min()).to_numpy())
+    segmentos = segmentar_abc(df, CHAVE_SERIE, COLUNA_ALVO, (df["Data"] < inicio_da_base(df, linhas_teste)).to_numpy())
     print("Teste — WAPE mediano por série em cada segmento ABC (volume antes do teste: A = 80%, B = 80–95%):")
     print(comparar_por_segmento(por_serie, CHAVE_SERIE, segmentos).to_string(float_format="{:,.4f}".format))
+    if len(clientes) > 1:
+        for cliente in clientes:
+            parte = por_serie[por_serie["Cliente"] == cliente]
+            print(f"Teste — {cliente}:")
+            print(comparar_modelos(parte, CHAVE_SERIE, "Previsao").to_string(float_format="{:,.4f}".format))
+            print(comparar_por_segmento(parte, CHAVE_SERIE, segmentos).to_string(float_format="{:,.4f}".format))
     por_serie = por_serie.join(segmentos, on=list(CHAVE_SERIE))
     por_serie["Segmento"] = por_serie["Segmento"].fillna("C")
     print("Teste — modelo em todas as linhas:")
